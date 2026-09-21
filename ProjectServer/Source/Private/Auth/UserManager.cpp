@@ -11,6 +11,35 @@
 #include "SQRLLEncryption.h"
 #include "WebUtils/StringHelpers.h"
 
+namespace
+{
+	// Whitelist for user-chosen usernames (registration and change_name).
+	// Deliberately narrow: letters, digits, space and a few common separators.
+	// This blocks control characters and HTML/JSON-significant characters
+	// (<, >, ", ', /, \, etc.), which are the usual stored-XSS vectors when a
+	// name is rendered by a client. Non-ASCII is intentionally excluded
+	constexpr std::string_view USERNAME_ALLOWED_CHARSET =
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-";
+
+	// Strips C0 control bytes (0x00-0x1F), the DEL byte (0x7F) and C1 control
+	// bytes (0x80-0x9F). Used for OAuth-provided display names (Google/Microsoft)
+	// which may legitimately contain non-ASCII characters (e.g. accented or non-Latin names)
+	// but must never contain control bytes that could break a client renderer.
+	std::string StripControlCharacters(const std::string& InName)
+	{
+		std::string Out;
+		Out.reserve(InName.size());
+		for (const unsigned char Ch : InName)
+		{
+			if (Ch >= 0x20 && Ch != 0x7F && (Ch < 0x80 || Ch > 0x9F))
+			{
+				Out.push_back(static_cast<char>(Ch));
+			}
+		}
+		return Out;
+	}
+}
+
 FUserManager::FUserManager(Uint64 InSessionExpirationTime)
 	: NextAvailableIndex(0)
 	, CurrentTimeCached(0)
@@ -77,8 +106,8 @@ ERegisterUserStatus FUserManager::PrepareRegistration(const std::string& InUserN
 		RegisterUserStatus = ERegisterUserStatus::MailLengthIncorrect;
 	}
 
-	// Check User name
-	if (!ValidateUserNameLength(InUserName))
+	// Check User name (length + allowed character set)
+	if (!ValidateUserName(InUserName))
 	{
 		RegisterUserStatus = ERegisterUserStatus::UserNameLengthIncorrect;
 	}
@@ -163,15 +192,27 @@ ERegisterUserStatus FUserManager::RegisterIntegration(const std::string& InUserN
 		EDatabaseOperationResult CheckOpResult = DoesUserWithMailExists(InUserEMail, bUserExists);
 		if (CheckOpResult == EDatabaseOperationResult::Success && !bUserExists)
 		{
+			// SECURITY: OAuth display names can contain Unicode and are not subject
+			// to the strict username whitelist, but they must never contain control
+			// characters. Strip them before persisting.
+			const std::string SanitizedUserName = StripControlCharacters(InUserName);
+
+			// SECURITY (defense-in-depth): an integration account must never
+			// authenticate with a password. Storing an empty hash would let a
+			// hypothetical password-login path trivially match an empty input.
+			// Instead, hash a random secret so the stored value can never be
+			// verified against any real password.
+			const std::string UnusablePasswordHash = HashUserPassword(FEncryptionUtil::GenerateSecureSalt(32));
+
 			const std::shared_ptr<FUser> UserPtr = std::make_shared<FUser>(this);
 			FUser* User = UserPtr.get();
-			User->SetUserName(InUserName);
-			User->SetPassword("");
+			User->SetUserName(SanitizedUserName);
+			User->SetPassword(UnusablePasswordHash);
 			User->SetUserEMail(InUserEMail);
 			User->UpdateLastActiveTime();
 
 			Uint64 Id = 0;
-			EDatabaseOperationResult UploadOpResult = UploadUserToDataBase(InUserName, "", InUserEMail, Id);
+			EDatabaseOperationResult UploadOpResult = UploadUserToDataBase(SanitizedUserName, UnusablePasswordHash, InUserEMail, Id);
 			if (UploadOpResult == EDatabaseOperationResult::Success && Id > 0)
 			{
 				User->SetUserId(Id);
@@ -314,8 +355,12 @@ ELoginStatus FUserManager::LoginFromId(const Uint64 Id, std::string& OutSessionT
 {
 	ELoginStatus LoginStatus = ELoginStatus::IncorrectCredentialsOrUserDoesNotExist;
 
+	// SECURITY: GetUserById() returns nullptr when the ID does not resolve to a
+	// user (e.g. a transfer token referencing a since-deleted account). The
+	// previous code called UserPtr->IsValid() unconditionally, dereferencing a
+	// null shared_ptr and crashing the server (a remote-triggerable DoS).
 	const std::shared_ptr<FUser> UserPtr = GetUserById(Id);
-	if (UserPtr->IsValid())
+	if (UserPtr != nullptr && UserPtr->IsValid())
 	{
 		OnLoginSuccessful(UserPtr, false);
 
@@ -341,21 +386,9 @@ bool FUserManager::Logout(const std::string& InSessionToken)
 	return SessionManager->DeactivateSession(InSessionToken);
 }
 
-bool FUserManager::AreLoginCredentialsCorrect(const std::string& InUserName, const std::string& InUserPassword)
+void FUserManager::InvalidateAllSessionsForUser(const Uint64 InUserId)
 {
-	bool bAreLoginCredentialsCorrect = false;
-
-	const std::shared_lock ScopeLock(UserDataBaseMutex);
-	for (const std::pair<const Uint64, std::shared_ptr<FUser>>& UserPair : UserDataBaseCache)
-	{
-		FUser* User = UserPair.second.get();
-		if (User->IsUserPasswordCorrect(InUserPassword))
-		{
-			bAreLoginCredentialsCorrect = true;
-		}
-	}
-
-	return bAreLoginCredentialsCorrect;
+	SessionManager->DeactivateAllSessionsForUser(InUserId);
 }
 
 bool FUserManager::VerifyToken(const std::string& InToken) const
@@ -406,6 +439,16 @@ EUpdateUserNameStatus FUserManager::UpdateUserName(const Uint64 UsedId, const st
 		return EUpdateUserNameStatus::UserNameLengthIncorrect;
 	}
 
+	// SECURITY: usernames (display names) are echoed to every other client, so
+	// they must be constrained to a safe character set. The length check alone
+	// still allowed control characters, HTML brackets, quotes, etc. - all
+	// stored-XSS / control-injection vectors if a client renders a name without
+	// escaping.
+	if (!FStringHelpers::ValidateString(NewUserName, USERNAME_ALLOWED_CHARSET))
+	{
+		return EUpdateUserNameStatus::UserNameIncorrect;
+	}
+
 	EUpdateUserNameStatus OutStatus = EUpdateUserNameStatus::Unknown;
 
 	try
@@ -426,7 +469,7 @@ EUpdateUserNameStatus FUserManager::UpdateUserName(const Uint64 UsedId, const st
 			const bool bGetUsers = GetUsersByIds({ UsedId }, Users);
 			if (bGetUsers)
 			{
-				std::shared_ptr<FUser>& FirstUser = Users[0];
+				const std::shared_ptr<FUser>& FirstUser = Users[0];
 				FirstUser->SetUserName(NewUserName);
 
 				OutStatus = EUpdateUserNameStatus::Successful;
@@ -453,10 +496,10 @@ EUpdateUserPasswordStatus FUserManager::UpdateUserPassword(const Uint64 InUserId
 		return EUpdateUserPasswordStatus::PasswordIncorrect;
 	}
 
-	EUpdateUserPasswordStatus OutStatus = EUpdateUserPasswordStatus::Successful;
-	std::string UserPasswordHash = HashUserPassword(NewPassword);
+	const EUpdateUserPasswordStatus OutStatus = EUpdateUserPasswordStatus::Successful;
+	const std::string UserPasswordHash = HashUserPassword(NewPassword);
 
-	std::shared_ptr<FUser> UserPtr = GetUserById(InUserId);
+	const std::shared_ptr<FUser> UserPtr = GetUserById(InUserId);
 	if (UserPtr == nullptr)
 	{
 		return EUpdateUserPasswordStatus::UserNotFound;
@@ -469,18 +512,39 @@ EUpdateUserPasswordStatus FUserManager::UpdateUserPassword(const Uint64 InUserId
 
 	UpdateUserPasswordInDataBase(InUserId, UserPasswordHash);
 
+	// Password change must invalidate every existing session for
+	// this user. Otherwise an attacker who logged in before the change keeps a
+	// valid session even after the victim resets their credential.
+	InvalidateAllSessionsForUser(InUserId);
+
 	return OutStatus;
 }
 
 EUpdateUserPasswordStatus FUserManager::OverrideUserPassword(Uint64 InUserId, const std::string& NewPassword)
 {
-	EUpdateUserPasswordStatus OutStatus = EUpdateUserPasswordStatus::Successful;
-	std::string UserPasswordHash = HashUserPassword(NewPassword);
+	if (!ValidatePasswordLength(NewPassword))
+	{
+		return EUpdateUserPasswordStatus::PasswordLengthIncorrect;
+	}
 
-	EDatabaseOperationResult DatabaseOpResult = UpdateUserPasswordInDataBase(InUserId, UserPasswordHash);
+	if (!FStringHelpers::ValidateString(NewPassword, FPredefinedCharsets::BASE_SIMPLE_PASSWORD))
+	{
+		return EUpdateUserPasswordStatus::PasswordIncorrect;
+	}
+
+	EUpdateUserPasswordStatus OutStatus = EUpdateUserPasswordStatus::Successful;
+	const std::string UserPasswordHash = HashUserPassword(NewPassword);
+
+	const EDatabaseOperationResult DatabaseOpResult = UpdateUserPasswordInDataBase(InUserId, UserPasswordHash);
 	if (DatabaseOpResult != EDatabaseOperationResult::Success)
 	{
 		OutStatus = EUpdateUserPasswordStatus::Unknown;
+	}
+	else
+	{
+		// SECURITY: a password reset must invalidate every existing session for
+		// this user (e.g. sessions held by an attacker before the compromise).
+		InvalidateAllSessionsForUser(InUserId);
 	}
 
 	return OutStatus;
@@ -899,7 +963,7 @@ std::string FUserManager::HashUserPassword(const std::string& RawPassword)
 
 FArgonSettings FUserManager::GetArgonSettings() const
 {
-	return FArgonSettings(2, 15 * 1024, 1, 128, 64);
+	return FArgonSettings(2, 19 * 1024, 1, 128, 64);
 }
 
 void FUserManager::OnLoginSuccessful(const std::shared_ptr<FUser>& UserPtr, const bool bWereDownloadedFromDB)
@@ -939,6 +1003,14 @@ void FUserManager::AddUserToCache(const std::shared_ptr<FUser>& UserPtr)
 bool FUserManager::ValidateUserNameLength(const std::string& InUserName)
 {
 	return (InUserName.size() > 4 && InUserName.size() < 110);
+}
+
+bool FUserManager::ValidateUserName(const std::string& InUserName)
+{
+	// SECURITY: usernames are echoed to every other client, so they must satisfy
+	// both a length bound and a safe character whitelist (see USERNAME_ALLOWED_CHARSET).
+	return ValidateUserNameLength(InUserName) &&
+	       static_cast<bool>(FStringHelpers::ValidateString(InUserName, USERNAME_ALLOWED_CHARSET));
 }
 
 bool FUserManager::ValidatePasswordLength(const std::string& InPassword)

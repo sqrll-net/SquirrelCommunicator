@@ -24,6 +24,7 @@ FBackendSettings::FBackendSettings()
     , UnauthenticatedRequestsPerHour(300)
     , AuthenticatedRequestsPerHour(2000)
     , WebSocketIdleTimeoutSeconds(300)          // 5 minutes
+    , bTrustForwardedFor(false)
     , ImageKeyInvalidationSeconds(3600)          // 1 hour
     , ImageInstanceProbeIntervalSeconds(30)      // poll image /instance every 30s
     , ImageServiceCircuitBreakerThreshold(3)     // open after 3 consecutive failures
@@ -78,6 +79,12 @@ void FBackendSettings::LoadBackendSettings()
         if (WebSocketIdleTimeoutSecondsField.IsValid())
         {
             WebSocketIdleTimeoutSeconds = WebSocketIdleTimeoutSecondsField.GetValueAsInt();
+        }
+
+        const FIniField TrustForwardedForField = BackendSettingsIniObject->FindFieldByName("TrustForwardedFor");
+        if (TrustForwardedForField.IsValid())
+        {
+            bTrustForwardedFor = TrustForwardedForField.GetValueAsBool();
         }
 
         // --- Image service settings ---
@@ -225,7 +232,7 @@ void FBackendSettings::LoadMessageEncryptionKey()
     if (EnvKey != nullptr && EnvKey[0] != '\0')
     {
         MessageEncryptionKey = std::string(EnvKey);
-        LOG_STATE("✅ Message encryption key loaded from environment variable MESSAGE_ENCRYPTION_KEY. Message encryption is ENABLED.");
+        LOG_STATE("✅ Message encryption key loaded from environment variable SQRLL_MESSAGE_ENCRYPTION_KEY. Message encryption is ENABLED.");
         return;
     }
 

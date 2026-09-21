@@ -321,14 +321,14 @@ std::string FRoomsServiceManager::GetRoomToken(const std::string& RoomName)
 std::string FRoomsServiceManager::CreateRoomToken(const std::string& RoomName)
 {
     bool bTokenExists = false;
-    std::string Token = "";
+    std::string Token;
 
     {
         // Lock shared to check if token exists already
         std::shared_lock<std::shared_mutex> Lock(RoomNameToTokenMutex);
 
-        auto TokenIter = RoomNameToToken.find(RoomName);
-        if (TokenIter != RoomNameToToken.end() && TokenIter->second != "")
+        const auto TokenIter = RoomNameToToken.find(RoomName);
+        if (TokenIter != RoomNameToToken.end() && !TokenIter->second.empty())
         {
             bTokenExists = true;
             Token = TokenIter->second;
@@ -350,34 +350,33 @@ std::string FRoomsServiceManager::CreateRoomToken(const std::string& RoomName)
 
 std::string FRoomsServiceManager::GenerateRandomBase64(const size_t OutLength)
 {
-    static constexpr std::string_view B64_CHARS =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    const size_t RequiredBytes = (OutLength * 3) / 4;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dis(0, 255);
-
-    std::vector<unsigned char> RawData(RequiredBytes);
-    for (size_t i = 0; i < RequiredBytes; ++i) {
-        RawData[i] = static_cast<unsigned char>(dis(gen));
+    if (OutLength == 0)
+    {
+        return {};
     }
+
+    static constexpr std::string_view B64_CHARS = SQRLLPredefinedCharsets::BASE64;
+
+    // Round up to ensure we generate enough raw bytes to satisfy OutLength
+    const size_t RequiredBytes = (OutLength * 3 + 3) / 4;
+    const std::string Raw = FEncryptionUtil::GenerateSecureSalt(RequiredBytes);
 
     std::string Encoded;
     Encoded.reserve(OutLength);
 
     size_t i = 0;
-    while (i < RequiredBytes) {
-        uint32_t OctetA = RawData[i++];
-        uint32_t OctetB = (i < RequiredBytes) ? RawData[i++] : 0;
-        uint32_t OctetC = (i < RequiredBytes) ? RawData[i++] : 0;
+    while (i < RequiredBytes && Encoded.length() < OutLength)
+    {
+        const uint32_t OctetA = static_cast<unsigned char>(Raw[i++]);
+        const uint32_t OctetB = (i < RequiredBytes) ? static_cast<unsigned char>(Raw[i++]) : 0;
+        const uint32_t OctetC = (i < RequiredBytes) ? static_cast<unsigned char>(Raw[i++]) : 0;
 
-        uint32_t Triple = (OctetA << 16) + (OctetB << 8) + OctetC;
+        const uint32_t Triple = (OctetA << 16) | (OctetB << 8) | OctetC;
 
         Encoded += B64_CHARS[(Triple >> 18) & 0x3F];
-        Encoded += B64_CHARS[(Triple >> 12) & 0x3F];
 
+        if (Encoded.length() < OutLength)
+            Encoded += B64_CHARS[(Triple >> 12) & 0x3F];
         if (Encoded.length() < OutLength)
             Encoded += B64_CHARS[(Triple >> 6) & 0x3F];
         if (Encoded.length() < OutLength)

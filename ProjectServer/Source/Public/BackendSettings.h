@@ -39,6 +39,16 @@ public:
     /** WebSocket idle timeout in seconds before uWS disconnects an inactive client (default 300 = 5 min) */
     int32 GetWebSocketIdleTimeoutSeconds() const { return WebSocketIdleTimeoutSeconds; }
 
+    /**
+     * Whether the WebSocket listener should trust the client-supplied
+     * "x-forwarded-for" header for abuse/rate-limiting attribution. This must
+     * remain FALSE unless the WebSocket port is reachable only through a
+     * trusted reverse proxy (nginx/cloudflared) that overwrites the header.
+     * When false, the real socket peer address is used, so a direct client
+     * cannot spoof the header to evade rate limits or abuse bans.
+     */
+    bool GetTrustForwardedFor() const { return bTrustForwardedFor; }
+
     // --- Image service settings ---
 
     /**
@@ -210,6 +220,7 @@ protected:
 
     // --- WebSocket settings ---
     int32 WebSocketIdleTimeoutSeconds;
+    bool bTrustForwardedFor;
 
     // --- Image service settings ---
     int32 ImageKeyInvalidationSeconds;

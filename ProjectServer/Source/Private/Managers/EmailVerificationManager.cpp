@@ -38,16 +38,15 @@ void FEmailVerificationManager::Init()
 
 FPendingRegistration FEmailVerificationManager::GenerateVerificationCode(const std::string& UserMail, const std::string& UserName, const std::string& PasswordHash)
 {
-    // 6 digit numeric code.
+    // Verification code must be unpredictable.
     std::random_device RandomDevice;
-    std::mt19937 Generator(RandomDevice());
     std::uniform_int_distribution<int32> Distribution(0, 9);
 
     std::string Code;
     Code.reserve(6);
     for (int32 i = 0; i < 6; ++i)
     {
-        Code.push_back(static_cast<char>('0' + Distribution(Generator)));
+        Code.push_back(static_cast<char>('0' + Distribution(RandomDevice)));
     }
 
     FPendingRegistration Pending;

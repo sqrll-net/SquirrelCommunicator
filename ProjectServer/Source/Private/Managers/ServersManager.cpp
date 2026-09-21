@@ -733,6 +733,13 @@ Uint64 FServersManager::AddMessage(Uint64 ServerId, Uint64 ChannelId, Uint64 Sen
         return 0;
     }
 
+    // Verify the channel actually belongs to this server before persisting.
+    if (!Server->GetChannel(ChannelId))
+    {
+        LOG_WARN("AddMessage: channel " << ChannelId << " does not belong to server " << ServerId);
+        return 0;
+    }
+
     FServerMessage Message;
     Message.ChannelId = ChannelId;
     Message.SenderId = SenderId;

@@ -41,10 +41,20 @@ void FAccountEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
                 if (JsonData)
                 {
                     const std::string NewUserName = JsonData["new_name"].s();
-                    UserManager->UpdateUserName(UserId, NewUserName);
+                    const EUpdateUserNameStatus UpdateResult = UserManager->UpdateUserName(UserId, NewUserName);
 
-                    // Successful set
-                    OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "User name changed."} });
+                    if (UpdateResult == EUpdateUserNameStatus::Successful)
+                    {
+                        OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "User name changed."} });
+                    }
+                    else if (UpdateResult == EUpdateUserNameStatus::UserNameIncorrect)
+                    {
+                        OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "User name contains invalid characters."} });
+                    }
+                    else
+                    {
+                        OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "User name length is invalid."} });
+                    }
                 }
             }
             catch (const nlohmann::json::exception& e)
@@ -89,13 +99,47 @@ void FAccountEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
                  {
                      const std::string OldPassword = JsonData["old_password"].s();
                      const std::string NewPassword = JsonData["new_password"].s();
-                     UserManager->UpdateUserPassword(UserId, OldPassword, NewPassword);
 
-                     // Successful set
-                     OutResponse = FCrowUtils::CreateResponse(crow::status::OK,
-                         { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success },
-                             { "message", "User password changed."} }
-                     );
+                     const EUpdateUserPasswordStatus UpdateResult = UserManager->UpdateUserPassword(UserId, OldPassword, NewPassword);
+
+                     switch (UpdateResult)
+                     {
+                     case EUpdateUserPasswordStatus::Successful:
+                         OutResponse = FCrowUtils::CreateResponse(crow::status::OK,
+                             { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success },
+                                 { "message", "User password changed."} }
+                         );
+                         break;
+
+                     case EUpdateUserPasswordStatus::OldPasswordIncorrect:
+                         OutResponse = FCrowUtils::CreateResponse(crow::status::FORBIDDEN,
+                             { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+                                 { "message", "Old password is incorrect."} }
+                         );
+                         break;
+
+                     case EUpdateUserPasswordStatus::PasswordLengthIncorrect:
+                     case EUpdateUserPasswordStatus::PasswordIncorrect:
+                         OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST,
+                             { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+                                 { "message", "New password does not meet the requirements."} }
+                         );
+                         break;
+
+                     case EUpdateUserPasswordStatus::UserNotFound:
+                         OutResponse = FCrowUtils::CreateResponse(crow::status::NOT_FOUND,
+                             { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+                                 { "message", "User not found."} }
+                         );
+                         break;
+
+                     default:
+                         OutResponse = FCrowUtils::CreateResponse(crow::status::INTERNAL_SERVER_ERROR,
+                             { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+                                 { "message", "Could not change password."} }
+                         );
+                         break;
+                     }
                  }
              }
              catch (const nlohmann::json::exception& e)
@@ -156,6 +200,8 @@ void FAccountEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
                 {
                     if (AbuseProtection->CanAddressRequestPasswordReset(ClientIP))
                     {
+                        AbuseProtection->AddPasswordResetAttempt(ClientIP);
+
                         // Now we need to generate some kind of code, preferably 6 digit long
                         FPasswordResetManager* PasswordResetManager = ProjectEngine->GetPasswordResetManager();
                         FPasswordResetStruct ResetStruct = PasswordResetManager->GenerateResetToken(TargetMail);
@@ -170,10 +216,16 @@ void FAccountEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
                             }}
                         };
 
-                        // Do send
-                        FMailSender::SendMail(JsonBody);
-
-                        AbuseProtection->AddPasswordResetAttempt(ClientIP);
+                        // Do send. Wrap in try/catch: SendMail throws on mail-provider
+                        // failure, and an unhandled exception here would surface a generic 500.
+                        try
+                        {
+                            FMailSender::SendMail(JsonBody);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            LOG_ERROR("Password reset mail failed: " << e.what());
+                        }
                     }
                 }
             }
@@ -238,6 +290,8 @@ void FAccountEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 
                     if (bUpdateSuccess)
                     {
+                        PasswordResetManager->InvalidateToken(ResetCode);
+
                         OutResponse = FCrowUtils::CreateResponse(crow::status::OK, {
                             { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success },
                             { "message", "Password reset successful."} }

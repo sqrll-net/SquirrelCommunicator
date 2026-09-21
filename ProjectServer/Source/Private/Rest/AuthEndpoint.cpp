@@ -54,12 +54,11 @@ void FAuthEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 
 				if (PrepareStatus == ERegisterUserStatus::Unknown)
 				{
-					// Do not send a verification mail to an already registered account.
-					if (UserManager->FindUserByMail(EMail) != nullptr)
-					{
-						OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message","Registration failed. User may already exist or invalid input."} });
-					}
-					else
+					// SECURITY (anti-enumeration): return an identical response whether or
+					// not the email is already registered.
+					const bool bAlreadyRegistered = (UserManager->FindUserByMail(EMail) != nullptr);
+
+					if (!bAlreadyRegistered)
 					{
 						// Generate the verification code and keep the registration pending.
 						FEmailVerificationManager* VerificationManager = ProjectEngine->GetEmailVerificationManager();
@@ -89,8 +88,10 @@ void FAuthEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 							LOG_ERROR("Registration verification mail failed: " << e.what());
 						}
 
-						OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "Registration started. Check your email for the verification code."} });
 					}
+					// Identical response for both branches - the client cannot distinguish
+					// a new registration from an already-registered email.
+					OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "If following mail is not registered, you will got email with the verification code."} });
 				}
 				else
 				{
@@ -199,7 +200,7 @@ void FAuthEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 					{
 						case ELoginStatus::Unknown:
 						{
-							OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "User login successful!"}, { "message", "unknown issue" } });
+							OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "Login failed due to an internal error." } });
 
 							break;
 						}
@@ -250,7 +251,7 @@ void FAuthEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 
 			if (ProjectEngine->GetUserManager()->VerifyToken(Token))
 			{
-				OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "Token correct."} });
+				OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "Token correct."} });
 			}
 			else
 			{
@@ -275,7 +276,7 @@ void FAuthEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 			{
 				if (ProjectEngine->GetUserManager()->RefreshSessionToken(Token))
 				{
-					OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error }, { "message", "Token has new refreshed."} });
+					OutResponse = FCrowUtils::CreateResponse(crow::status::OK, { { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Success }, { "message", "Token has new refreshed."} });
 				}
 				else
 				{

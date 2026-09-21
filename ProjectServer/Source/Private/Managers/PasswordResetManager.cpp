@@ -6,7 +6,7 @@
 #include "Auth/UserManager.h"
 #include "ThreadCompat.h"
 
-#include <random>
+#include "SQRLLEncryption.h"
 
 FPasswordResetManager::FPasswordResetManager(int32 InTimeInMinsForTokenToBeAlive)
     : TimeInMinsForTokenToBeAlive(InTimeInMinsForTokenToBeAlive)
@@ -41,25 +41,22 @@ void FPasswordResetManager::Init()
 
 FPasswordResetStruct FPasswordResetManager::GenerateResetToken(const std::string& UserMail)
 {
-    // Set of chars 0-9, A-F
-    static std::array<char, 16> RandomBytes = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+    // SECURITY: generate the reset token with a CSPRNG of at least 128 bits of
+    // entropy. The previous 6-hex-char token had only 24 bits (~16.7M options),
+    // which is realistically brute-forceable. std::mt19937 (Mersenne Twister) is
+    // also deterministic and its state can be recovered after observing enough
+    // outputs, so it must never be used for security tokens.
+    const std::string RawToken = FEncryptionUtil::GenerateSecureSalt(16); // 16 bytes = 128 bits
 
-    static int32 TokenLength = 6;
-
-    std::vector<char> RandomToken;
-    RandomToken.reserve(TokenLength);
-
-    for (int32 i = 0; i < TokenLength; ++i)
+    // Hex-encode the raw bytes into a printable token (32 hex characters).
+    static constexpr char HexDigits[] = "0123456789ABCDEF";
+    std::string TokenString;
+    TokenString.reserve(RawToken.size() * 2);
+    for (const unsigned char Byte : RawToken)
     {
-        static std::random_device rd;
-        static std::mt19937 gen(rd());
-        static std::uniform_int_distribution<int32> dist(0, 15);
-        const int32 RandomIndex = dist(gen);
-        RandomToken.push_back(RandomBytes[RandomIndex]);
+        TokenString.push_back(HexDigits[Byte >> 4]);
+        TokenString.push_back(HexDigits[Byte & 0x0F]);
     }
-
-    // Make token as string
-    const std::string TokenString(RandomToken.begin(), RandomToken.end());
 
     // Make struct
     FPasswordResetStruct ResetStruct = { UserMail, TokenString };
@@ -76,17 +73,21 @@ FPasswordResetStruct FPasswordResetManager::GenerateResetToken(const std::string
 
 bool FPasswordResetManager::ValidateResetToken(const std::string& UserMail, const std::string& ResetToken)
 {
-    bool bTokenMatch = false;
-
     // Mutex shared lock
     std::shared_lock<std::shared_mutex> Lock(TokenToStructureMapMutex);
 
-    if (TokenToStructureMap.contains(ResetToken) && TokenToStructureMap[ResetToken].UserMailForReset == UserMail)
+    const auto It = TokenToStructureMap.find(ResetToken);
+    if (It == TokenToStructureMap.end() || It->second.UserMailForReset != UserMail)
     {
-        bTokenMatch = true;
+        return false;
     }
 
-    return bTokenMatch;
+    if (It->second.TokenExpirationTime < std::chrono::system_clock::now())
+    {
+        return false;
+    }
+
+    return true;
 }
 
 bool FPasswordResetManager::UpdatePassword(const std::string& UserMail, const std::string& NewPassword)

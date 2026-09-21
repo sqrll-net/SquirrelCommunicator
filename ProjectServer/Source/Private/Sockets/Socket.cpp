@@ -163,11 +163,14 @@ auto CreateSocketBehavior(FSocket* Socket) {
 				{
 					TempClientIp = res->getRemoteAddressAsText();
 
-					// If behind proxy (nginx, cloudflare), check forwarded header
-					std::string_view ForwardedHeader = req->getHeader("x-forwarded-for");
-					if (!ForwardedHeader.empty())
+					const FBackendSettings* Settings = ProjectEngine->GetBackendSettings();
+					if (Settings != nullptr && Settings->GetTrustForwardedFor())
 					{
-						TempClientIp = ForwardedHeader; // Use forwarded IP instead
+						const std::string_view ForwardedHeader = req->getHeader("x-forwarded-for");
+						if (!ForwardedHeader.empty())
+						{
+							TempClientIp = ForwardedHeader;
+						}
 					}
 
 					ProjectEngine->GetAbuseProtection()->AddRateLimitedAttempt(std::string(TempClientIp));

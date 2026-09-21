@@ -485,6 +485,13 @@ void FPrivateSocketData::OnMessageReceived_Message(AnyWebSocket wsVariant, uWS::
 			const Uint64& ConnectionUserId = WebSocketSessionData->UserId;
 			if (Conversation != nullptr)
 			{
+				// SECURITY (authorization): only actual conversation participants may post.
+				if (!ConversationsManager->IsUserInConversation(ConnectionUserId, ConversationId))
+				{
+					FSocket::EarlyExit(wsVariant, "not a member of this conversation", opCode);
+					return;
+				}
+
 				const Uint64 OutId = ConversationsManager->AddMessage(ConversationId, ConnectionUserId, Content, MessageType);
 
 				// Build the message payload used for both direct confirmation and broadcast
@@ -610,6 +617,12 @@ void FPrivateSocketData::OnMessageReceived_Typing(AnyWebSocket wsVariant, uWS::O
 			FSocketManager* SocketManager = ProjectEngine->GetSocketManager();
 			FUserManager* UserManager = ProjectEngine->GetUserManager();
 			std::shared_ptr<FConversationData> Conversation = ConversationsManager->GetConversation(ConversationId);
+
+			if (Conversation == nullptr || !ConversationsManager->IsUserInConversation(ConnectionUserId, ConversationId))
+			{
+				return;
+			}
+
 			std::vector<std::shared_ptr<FUser>> Users;
 			UserManager->GetUsersByIds(Conversation->UsersIds.Vector(), Users);
 

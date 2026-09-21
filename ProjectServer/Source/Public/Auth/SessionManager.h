@@ -56,6 +56,15 @@ public:
 
 	/** @return true if session were found and removed */
 	bool DeactivateSession(const std::string& InSessionToken);
+
+	/**
+	 * Deactivate EVERY session belonging to a user.
+	 * Called after a password change or reset so that an attacker who still
+	 * holds a pre-compromise session token loses access (forces re-login on all
+	 * devices). Missing users are a no-op.
+	 */
+	void DeactivateAllSessionsForUser(Uint64 InUserId);
+
 	bool IsSessionTokenAlive(const std::string& InSessionToken);
 
 	/**
@@ -66,6 +75,11 @@ public:
 	void SetOnSessionDeactivatedCallback(std::function<void(const std::string&)> InCallback);
 
 private:
+	/**
+	 * Generates a fresh random session token.
+	 * Uses UserID to ensure it never repeats.
+	 * In general user IDs are known to other users so it should be safe.
+	 */
 	std::string CreateTokenFromId(Uint64 InUserId) const;
 
 private:

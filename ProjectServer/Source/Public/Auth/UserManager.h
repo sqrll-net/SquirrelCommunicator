@@ -22,6 +22,7 @@ enum class ERegisterUserStatus : Uint8
 	PasswordLengthIncorrect,
 	MailLengthIncorrect,
 	UserNameLengthIncorrect,
+	UserNameIncorrect,
 	MailIncorrect,
 	PasswordIncorrect,
 	DataBaseInsertFailed,
@@ -45,6 +46,7 @@ enum class EUpdateUserNameStatus : Uint8
 	Unknown,
 	Successful,
 	UserNameLengthIncorrect,
+	UserNameIncorrect,
 };
 
 enum class EUpdateUserPasswordStatus : Uint8
@@ -102,8 +104,6 @@ public:
 	/** @return true if successfully logged out */
 	bool Logout(const std::string& InSessionToken);
 
-	bool AreLoginCredentialsCorrect(const std::string& InUserName, const std::string& InUserPassword);
-
 	/** @return true when valid. Check if provided token is correct. */
 	bool VerifyToken(const std::string& InToken) const;
 
@@ -114,6 +114,13 @@ public:
 	EUpdateUserNameStatus UpdateUserName(Uint64 UsedId, const std::string& NewUserName);
 	EUpdateUserPasswordStatus UpdateUserPassword(Uint64 InUserId, const std::string& OldPassword, const std::string& NewPassword);
 	EUpdateUserPasswordStatus OverrideUserPassword(Uint64 InUserId, const std::string& NewPassword);
+
+	/**
+	 * Force-log-out a user on all devices by revoking every session token.
+	 * Called after a password change or reset so a pre-compromise session can
+	 * never survive credential remediation (defense-in-depth).
+	 */
+	void InvalidateAllSessionsForUser(Uint64 InUserId);
 
 	/** Search all users to find this with mail specified */
 	std::shared_ptr<FUser> FindUserByMail(const std::string& InMail);
@@ -149,6 +156,7 @@ private:
 	void AddUserToCache(const std::shared_ptr<FUser>& UserPtr);
 
 	bool ValidateUserNameLength(const std::string& InUserName);
+	bool ValidateUserName(const std::string& InUserName);
 	bool ValidatePasswordLength(const std::string& InPassword);
 	bool ValidateEMailLength(const std::string& InEMail);
 

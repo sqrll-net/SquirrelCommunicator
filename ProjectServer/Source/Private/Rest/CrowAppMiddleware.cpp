@@ -23,44 +23,46 @@ void FCrowAppMiddleware::before_handle(crow::request& Req, crow::response& Res, 
 	bool bIsAuthenticated = false;
 	Uint64 UserId = 0;
 
-	if (!AuthToken.empty())
+	if (!AuthToken.empty()) [[likely]]
 	{
 		const FUserManager* UserManager = ProjectEngine->GetUserManager();
-		if (UserManager->VerifyToken(AuthToken))
+		if (UserManager->VerifyToken(AuthToken)) [[likely]]
 		{
 			UserId = UserManager->GetIdFromToken(AuthToken);
 			bIsAuthenticated = (UserId != 0);
 		}
 	}
 
-	if (bIsAuthenticated)
+	if (bIsAuthenticated) [[likely]]
 	{
 		// Tier 2: per-UserID rate limit (default 2000/hr)
 		const std::string UserIdStr = std::to_string(UserId);
-		if (AbuseProtection->IsAuthenticatedUserBlocked(UserIdStr))
+		if (AbuseProtection->IsAuthenticatedUserBlocked(UserIdStr)) [[unlikely]]
 		{
 			Res.code = crow::status::TOO_MANY_REQUESTS;
 			Res.body = R"({"error":"Global rate limit exceeded"})";
 			Res.end();
 			return;
 		}
+
 		AbuseProtection->AddAuthenticatedUserAttempt(UserIdStr);
 	}
-	else
+	else [[unlikely]]
 	{
 		// Tier 1: per-IP rate limit for unauthenticated requests (default 300/hr)
-		if (AbuseProtection->IsUnauthenticatedIPBlocked(ClientIP))
+		if (AbuseProtection->IsUnauthenticatedIPBlocked(ClientIP)) [[unlikely]]
 		{
 			Res.code = crow::status::TOO_MANY_REQUESTS;
 			Res.body = R"({"error":"Global rate limit exceeded"})";
 			Res.end();
 			return;
 		}
+
 		AbuseProtection->AddUnauthenticatedIPAttempt(ClientIP);
 	}
 
 	// --- Specific abuse check (auth-sensitive operations like login, register) ---
-	if (!AbuseProtection->IsAddressBlocked(ClientIP))
+	if (!AbuseProtection->IsAddressBlocked(ClientIP)) [[likely]]
 	{
 		// Options support
 		if (Req.method == crow::HTTPMethod::Options)
@@ -69,7 +71,7 @@ void FCrowAppMiddleware::before_handle(crow::request& Req, crow::response& Res, 
 			Res.end();
 		}
 	}
-	else
+	else [[unlikely]]
 	{
 		// Block due to Too Many Requests
 		Res.code = crow::status::TOO_MANY_REQUESTS;
@@ -88,12 +90,20 @@ void FCrowAppMiddleware::after_handle(crow::request& Req, crow::response& Res, c
 
 	ProjectEngine->AddHeaders(Res, ProjectEngine->GetDefaultHeadersCache());
 
-	if (Whitelist.Size() && Whitelist.Contains(Origin))
+	if (Whitelist.Size() > 0) [[likely]]
 	{
-		ProjectEngine->AddHeaders(Res, { { AccessControlAllowOriginHeaderName, Origin } });
-	}
-	else
-	{
-		ProjectEngine->AddHeaders(Res, { { AccessControlAllowOriginHeaderName, Whitelist[0]} });
+		if (Whitelist.Contains(Origin)) [[likely]]
+		{
+			// Origin is explicitly allowed - reflect it back.
+			ProjectEngine->AddHeaders(Res, { { AccessControlAllowOriginHeaderName, Origin } });
+		}
+		else [[unlikely]]
+		{
+			// Origin is not in the whitelist. Reflect the first whitelist entry
+			// as a safe default so same-origin / default-frontend requests still
+			// receive a CORS response; an unlisted Origin will not match the
+			// reflected value and the browser will reject the request.
+			ProjectEngine->AddHeaders(Res, { { AccessControlAllowOriginHeaderName, Whitelist[0] } });
+		}
 	}
 }

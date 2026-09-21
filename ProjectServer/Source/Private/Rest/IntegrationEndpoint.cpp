@@ -4,6 +4,7 @@
 #include "ProjectEngine.h"
 #include "AbuseProtection/AbuseProtection.h"
 #include "Auth/UserManager.h"
+#include <cstdlib>
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -67,41 +68,81 @@ void FIntegrationEndpoint::RegisterRoutes(crow::App<FCrowAppMiddleware>& App)
 									{ "message", "Google integration - JSON Contains error:" + JSON_Error } }
 							);
 						}
-
-						// Google can let you login without verified mail, we do not want that
-						std::string MailVerified = json["email_verified"];
-						if (MailVerified == "true")
-						{
-							std::string Mail = json["email"];
-							std::string Name = json.value("name", "");
-
-							// User (if missing - DB Downlaod)
-							FUserManager* UserManager = ProjectEngine->GetUserManager();
-							std::shared_ptr<FUser> UserPtr = UserManager->FindUserByMail(Mail);
-
-							// User missing - try Register
-							if (UserPtr == nullptr)
-							{
-								UserPtr = RegisterIntegration(OutResponse, Mail, Name);
-							}
-
-							// Actual login
-							if (UserPtr != nullptr)
-							{
-								// Create session
-								std::string OutSessionToken;
-								const ELoginStatus LoginResult = UserManager->LoginIntegration(Mail, OutSessionToken);
-								HandleLoginCase(OutResponse, LoginResult, OutSessionToken, ClientIP);
-							}
-						}
 						else
 						{
-							LOG_ERROR("Google integration - E-Mail not verified.");
+							// SECURITY (audience validation): the ID token must have been issued
+							// for OUR Google OAuth client, not some attacker-controlled client.
+							// Without this check, a valid Google ID token minted for any Google
+							// project would be accepted, letting an attacker authenticate as any
+							// Google account they control through this integration.
+							const char* GoogleClientIdEnv = std::getenv("SQRLL_GOOGLE_CLIENT_ID");
+							const std::string ExpectedAudience = (GoogleClientIdEnv != nullptr) ? std::string(GoogleClientIdEnv) : std::string();
+							const std::string TokenAudience = json.value("aud", "");
 
-							OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST, 
-								{ { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
-									{ "message", "Google integration - E-Mail not verified."} }
-							);
+							if (ExpectedAudience.empty() || TokenAudience != ExpectedAudience)
+							{
+								// Fail closed: if the audience cannot be validated (client ID not
+								// configured, or a mismatch), the token must be rejected outright.
+								LOG_WARN("Google integration - token audience validation failed (expected '"
+									<< ExpectedAudience << "', got '" << TokenAudience << "').");
+
+								OutResponse = FCrowUtils::CreateResponse(crow::status::UNAUTHORIZED,
+									{ { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+										{ "message", "Google integration - invalid token audience."} }
+								);
+							}
+							else
+							{
+								// Google can let you login without verified mail, we do not want that.
+								// tokeninfo may return email_verified as a boolean or a string; accept both.
+								bool bEmailVerified = false;
+								if (json.contains("email_verified"))
+								{
+									const auto& EmailVerifiedJson = json["email_verified"];
+									if (EmailVerifiedJson.is_boolean())
+									{
+										bEmailVerified = EmailVerifiedJson.get<bool>();
+									}
+									else if (EmailVerifiedJson.is_string())
+									{
+										bEmailVerified = (EmailVerifiedJson.get<std::string>() == "true");
+									}
+								}
+
+								if (bEmailVerified)
+								{
+									std::string Mail = json["email"];
+									std::string Name = json.value("name", "");
+
+									// User (if missing - DB Downlaod)
+									FUserManager* UserManager = ProjectEngine->GetUserManager();
+									std::shared_ptr<FUser> UserPtr = UserManager->FindUserByMail(Mail);
+
+									// User missing - try Register
+									if (UserPtr == nullptr)
+									{
+										UserPtr = RegisterIntegration(OutResponse, Mail, Name);
+									}
+
+									// Actual login
+									if (UserPtr != nullptr)
+									{
+										// Create session
+										std::string OutSessionToken;
+										const ELoginStatus LoginResult = UserManager->LoginIntegration(Mail, OutSessionToken);
+										HandleLoginCase(OutResponse, LoginResult, OutSessionToken, ClientIP);
+									}
+								}
+								else
+								{
+									LOG_ERROR("Google integration - E-Mail not verified.");
+
+									OutResponse = FCrowUtils::CreateResponse(crow::status::BAD_REQUEST,
+										{ { FPredefinedMessages::Status::Name, FPredefinedMessages::Status::Error },
+											{ "message", "Google integration - E-Mail not verified."} }
+									);
+								}
+							}
 						}
 					}
 					catch (const nlohmann::json::exception& e)

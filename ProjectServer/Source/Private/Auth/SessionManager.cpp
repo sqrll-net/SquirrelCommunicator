@@ -199,6 +199,44 @@ bool FSessionManager::DeactivateSession(const std::string& InSessionToken)
 	return bDeactivatedSession;
 }
 
+void FSessionManager::DeactivateAllSessionsForUser(const Uint64 InUserId)
+{
+	// Security: called after a password change/reset. Without this, an attacker
+	// who holds a session token obtained before the credential change would keep
+	// a valid session indefinitely. Revoke every session so the user is forced
+	// to re-authenticate with the new credential on all devices.
+	std::vector<std::string> SessionTokens;
+
+	{
+		std::unique_lock<std::shared_mutex> WriteLock(SessionIdToUserIdMapMutex);
+
+		const auto UserSessionsIter = UserIdToSessionTokenMap.find(InUserId);
+		if (UserSessionsIter != UserIdToSessionTokenMap.end())
+		{
+			SessionTokens.assign(UserSessionsIter->second.begin(), UserSessionsIter->second.end());
+
+			// Remove each token from the primary token->session map.
+			for (const std::string& SessionToken : SessionTokens)
+			{
+				SessionIdToUserIdMap.erase(SessionToken);
+			}
+
+			// Remove the user->tokens entry entirely.
+			UserIdToSessionTokenMap.erase(UserSessionsIter);
+		}
+	}
+
+	// Notify AFTER releasing the lock to avoid re-entrancy/deadlock. The
+	// callback revokes the per-session image service key for each token.
+	if (OnSessionDeactivatedCallback)
+	{
+		for (const std::string& SessionToken : SessionTokens)
+		{
+			OnSessionDeactivatedCallback(SessionToken);
+		}
+	}
+}
+
 bool FSessionManager::IsSessionTokenAlive(const std::string& InSessionToken)
 {
 	bool bIsSessionTokenAlive = false;
@@ -210,8 +248,8 @@ bool FSessionManager::IsSessionTokenAlive(const std::string& InSessionToken)
 		const std::optional<FUserSessionData> UserSessionData = SessionIdToUserIdMap.FindValueByKey(InSessionToken);
 		if (UserSessionData.has_value())
 		{
-			const Uint64 SessionExpirationTime = UserSessionData->GetSessionTime();
-			bIsSessionTokenAlive = CurrentTimeCached < SessionExpirationTime;
+			const Uint64 CurrentSessionExpirationTime = UserSessionData->GetSessionTime();
+			bIsSessionTokenAlive = CurrentTimeCached < CurrentSessionExpirationTime;
 		}
 	}
 
