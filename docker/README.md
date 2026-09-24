@@ -137,6 +137,9 @@ SQRLL_VOICE_PORT=8082
 
 # The main password for communicating with the backend (Change this!)
 SQRLL_VOICE_API_KEY=
+
+# Domain for frontend
+SQRLL_VOICE_ALLOWED_DOMAINS=sqrll.net
 ```
 
 ### `.env.image` (image service container env)
